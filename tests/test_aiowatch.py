@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -56,3 +57,34 @@ async def test_threadpool_snapshot_register_unregister() -> None:
     assert "worker" not in snapshot_after["thread_pools"]
 
     pool.shutdown(wait=True)
+
+
+@pytest.mark.asyncio
+async def test_lifespan_style_watch_startup_and_shutdown() -> None:
+    reader = InMemoryMetricReader()
+    meter_provider = MeterProvider(metric_readers=[reader])
+    meter = meter_provider.get_meter("tests.lifespan")
+    watch = AioWatch(meter=meter, collect_interval=0.02)
+
+    @asynccontextmanager
+    async def lifespan() -> object:
+        await watch.start()
+        try:
+            yield watch
+        finally:
+            await watch.stop()
+
+    async with lifespan():
+        await asyncio.sleep(0.05)
+        await asyncio.create_task(_noop())
+        await asyncio.sleep(0.05)
+
+    data = reader.get_metrics_data()
+    metric_names = {
+        metric.name
+        for resource_metric in data.resource_metrics
+        for scope_metric in resource_metric.scope_metrics
+        for metric in scope_metric.metrics
+    }
+    assert "aiowatch.loop.lag" in metric_names
+    assert "aiowatch.loop.tasks.created" in metric_names
